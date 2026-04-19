@@ -1,25 +1,28 @@
 import os
-
-PATH = '/scratch/md5367/huggingface/dataset/'
-os.environ['TRANSFORMERS_CACHE'] = PATH
-os.environ['HF_HOME'] = PATH
-os.environ['HF_DATASETS_CACHE'] = PATH
-os.environ['TORCH_HOME'] = PATH
-os.environ['XDG_CACHE_HOME'] = PATH
-os.environ['TRANSFORMERS_CACHE'] = PATH
-
 import argparse
+import time
 
-parser = argparse.ArgumentParser(description="Write dataset name to a file.")
-parser.add_argument("--dataset", type=str, required=True, help="Name of the dataset to write to the file")
-parser.add_argument("--key_quantization_bits", type=int, required=True)
-parser.add_argument("--key_quantization_bits_initial_layers", type=int, required=True)
-parser.add_argument("--initial_layers_count", type=int, required=True)
-parser.add_argument("--outlier_count_general", type=int, required=True)
+import numpy as np
+import random
+import torch
+
+parser = argparse.ArgumentParser(description="TurboQuant LongBench-E evaluation.")
+parser.add_argument("--dataset", type=str, required=True, help="LongBench dataset name (e.g., qasper)")
+parser.add_argument("--key_quantization_bits", type=int, required=True,
+                    help="Total bits for residual (non-outlier) key channels, e.g. 192 for 2-bit x 96 channels")
+parser.add_argument("--key_quantization_bits_initial_layers", type=int, required=True,
+                    help="Total bits for outlier key channels, e.g. 96 for 3-bit x 32 channels")
+parser.add_argument("--initial_layers_count", type=int, required=True,
+                    help="Number of initial layers with different quantization (set 0 to use same config for all)")
+parser.add_argument("--outlier_count_general", type=int, required=True,
+                    help="Number of outlier channels per head (typically 32)")
+parser.add_argument("--output", type=str, default="result_llama3.txt",
+                    help="Output file for results (default: result_llama3.txt)")
 
 args = parser.parse_args()
-print(
-    f"The dataset is: {args.dataset}, {args.key_quantization_bits, args.key_quantization_bits_initial_layers, args.initial_layers_count}")
+print(f"Config: dataset={args.dataset}, key_bits={args.key_quantization_bits}, "
+      f"key_bits_initial={args.key_quantization_bits_initial_layers}, "
+      f"initial_layers={args.initial_layers_count}, outliers={args.outlier_count_general}")
 
 from metrics import (
     qa_f1_score,
@@ -80,6 +83,7 @@ dataset2prompt = {
     "lcc": "Please complete the code given below. \n{context}Next line of code:\n",
     "repobench-p": "Please complete the code given below. \n{context}{input}Next line of code:\n"
 }
+
 dataset2maxlen = {
     "narrativeqa": 128,
     "qasper": 128,
@@ -103,9 +107,6 @@ dataset2maxlen = {
     "lcc": 64,
     "repobench-p": 64
 }
-
-import numpy as np
-import random
 
 
 def seed_everything(seed):
@@ -140,33 +141,20 @@ def truncate_by_tokens(input, tok, max_tokens, manner: str = "middle"):
     return tokens
 
 
-# from models.llama3_utils_qjl import QJLSketch, QJLKeyQuantizer
-# from models.llama3_utils_rqjl_outlier import RQJLSketch, RQJLKeyQuantizer
 from models.llama3_utils_turbo_int_outlier import RQJLSketch, RQJLKeyQuantizer
-
 from models.llama3_rqjl_outlier import LlamaForCausalLM_QJL
-import time
-import numpy as np
-import torch
-from transformers import LlamaForCausalLM, LlamaConfig, AutoTokenizer
+
+from transformers import LlamaConfig, AutoTokenizer
 from datasets import load_dataset
-from tqdm import tqdm
-from fastchat.model import get_conversation_template
 
 seed_everything(42)
 
-model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"  # change other models if you want
+model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 dtype = torch.bfloat16
 device = 'cuda'
+
 config = LlamaConfig.from_pretrained(model_name)
-config._flash_attn_2_enabled = True
-use_qjl = True
-tic = time.time()
 config.attention_dropout = 0.0
-config.use_flash = True
-config = LlamaConfig.from_pretrained(model_name)
-config._flash_attn_2_enabled = True
-config._attn_implementation == "flash_attention_2"
 config.use_cache = True
 
 config.key_quantization_bits = args.key_quantization_bits
@@ -180,30 +168,32 @@ config.value_quantization_bits = 2
 config.group_size = 32
 config.buffer_size = 128
 
+outlier_dim = args.outlier_count_general
+residual_dim = 128 - outlier_dim
+
 generator = torch.Generator(device=torch.device(device))
-config.qjl_outlier = RQJLSketch(dimension=32, bit_width=args.key_quantization_bits // 128, rng=generator)
-config.qjl_residual = RQJLSketch(dimension=96, bit_width=args.key_quantization_bits_initial_layers // 128,
+generator.manual_seed(42)
+
+config.qjl_outlier = RQJLSketch(dimension=outlier_dim,
+                                bit_width=args.key_quantization_bits_initial_layers // outlier_dim,
+                                rng=generator)
+config.qjl_residual = RQJLSketch(dimension=residual_dim,
+                                 bit_width=args.key_quantization_bits // residual_dim,
                                  rng=generator)
+config.qjl_value = RQJLSketch(dimension=128,
+                              bit_width=config.value_quantization_bits,
+                              rng=generator)
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
+tic = time.time()
 model = LlamaForCausalLM_QJL.from_pretrained(
     pretrained_model_name_or_path=model_name,
     config=config,
     torch_dtype=dtype,
     device_map="auto",
 )
-tim_load = time.time() - tic
-print(f"model loaded ... {tim_load:.4f} sec")
-
-import os
-
-PATH = '/scratch/md5367/huggingface/dataset/'
-os.environ['TRANSFORMERS_CACHE'] = PATH
-os.environ['HF_HOME'] = PATH
-os.environ['HF_DATASETS_CACHE'] = PATH
-os.environ['TORCH_HOME'] = PATH
-os.environ['XDG_CACHE_HOME'] = PATH
+print(f"Model loaded in {time.time() - tic:.1f}s")
 
 dataset = args.dataset
 data = load_dataset('THUDM/LongBench', f"{dataset}_e", split='test')
@@ -214,10 +204,10 @@ n_data = len(data)
 max_input_length = 100_000
 maxlen = dataset2maxlen[dataset]
 
-aa = []
+scores_list = []
 start = time.time()
-for i in range(n_data):
 
+for i in range(n_data):
     json_obj = data[i]
     prompt = prompt_format.format(**json_obj)
 
@@ -226,11 +216,18 @@ for i in range(n_data):
     seq_len = len(input_tokens)
     terminators = [tokenizer.eos_token_id]
 
-    outputs = model.generate(**input_tensors, max_new_tokens=maxlen, eos_token_id=terminators, do_sample=False,
-                             temperature=None, top_p=None, use_cache=True, pad_token_id=tokenizer.pad_token_id,
-                             return_dict_in_generate=True)
+    outputs = model.generate(
+        **input_tensors,
+        max_new_tokens=maxlen,
+        eos_token_id=terminators,
+        do_sample=False,
+        temperature=None,
+        top_p=None,
+        use_cache=True,
+        pad_token_id=tokenizer.pad_token_id,
+        return_dict_in_generate=True,
+    )
     output = outputs.sequences[0, seq_len:]
-    output_token_len = len(output)
     output = tokenizer.decode(output, skip_special_tokens=True)
     pred = output.strip()
     pred = pred.lstrip('\n').split('\n')[0]
@@ -253,11 +250,24 @@ for i in range(n_data):
     mem_reserve = torch.cuda.memory_reserved() / 1024 / 1024 / 1024
     mem_peak = torch.cuda.memory_stats()['active_bytes.all.peak'] / 1024 / 1024 / 1024
 
-    mem_info = f"mem_alloc: {mem_alloc:.5f}, mem_reserved: {mem_reserve:.5f}, mem_peak: {mem_peak:.5f}"
-    aa.append(score)
-    print(f"[{i:>4}] score: {score:.4f}, avg_score: {total_score / (i + 1):.4f}, | {mem_info}")
+    mem_info = f"mem_alloc: {mem_alloc:.3f}G, mem_reserved: {mem_reserve:.3f}G, mem_peak: {mem_peak:.3f}G"
+    scores_list.append(score)
+    print(f"[{i:>4}/{n_data}] score: {score:.4f}, avg: {total_score / (i + 1):.4f} | {mem_info}")
 
-memory = ((32) * config.key_quantization_bits + (96) * config.key_quantization_bits_initial_layers) / (
-            128 * 128) + 1.0 * (config.outlier_count_general > 0)
-with open('result_llama3.txt', 'a') as file:
-    file.write(f"qjl, dataset {dataset}, memory {memory} bits, avg score: {np.mean(aa)}\n")
+elapsed = time.time() - start
+avg_score = np.mean(scores_list) if scores_list else 0.0
+
+memory = (outlier_dim * config.key_quantization_bits_initial_layers +
+          residual_dim * config.key_quantization_bits) / (128 * 128) + 1.0 * (config.outlier_count_general > 0)
+
+print(f"\n{'='*60}")
+print(f"Dataset: {dataset}")
+print(f"Effective memory: {memory:.2f} bits")
+print(f"Average score: {avg_score:.4f}")
+print(f"Time: {elapsed:.1f}s ({elapsed/n_data:.1f}s per sample)")
+print(f"{'='*60}")
+
+with open(args.output, 'a') as file:
+    file.write(f"turbo_quant, dataset {dataset}, memory {memory:.2f} bits, "
+               f"avg score: {avg_score:.4f}, time: {elapsed:.1f}s\n")
+    print(f"Results appended to {args.output}")

@@ -34,11 +34,11 @@ def split_outliers_and_residual(key_states, top_indices):
 
 def round_to_nearest_centroid(data: torch.Tensor, bitwidth: int) -> torch.Tensor:
     if bitwidth not in [1, 2, 3, 4, 5]:
-        raise ValueError("Bitwidth must be one of [1, 2, 3, 4]")
+        raise ValueError("Bitwidth must be one of [1, 2, 3, 4, 5]")
     centroids = [
-        torch.tensor([-0.797885, 0.797885], device='cuda'),
-        torch.tensor([-1.510017, -0.4526475, 0.4526475, 1.510017], device='cuda'),
-        torch.tensor([-2.1509, -1.34335, -0.75567, -0.244893, 0.244961, 0.75567, 1.34335, 2.1509], device='cuda'),
+        torch.tensor([-0.797885, 0.797885]),
+        torch.tensor([-1.510017, -0.4526475, 0.4526475, 1.510017]),
+        torch.tensor([-2.1509, -1.34335, -0.75567, -0.244893, 0.244961, 0.75567, 1.34335, 2.1509]),
         torch.tensor([-2.7235756,
                       -2.0604305,
                       -1.6096783,
@@ -54,7 +54,7 @@ def round_to_nearest_centroid(data: torch.Tensor, bitwidth: int) -> torch.Tensor
                       1.2484536,
                       1.6096783,
                       2.0604305,
-                      2.7235756], device='cuda'),
+                      2.7235756]),
         torch.tensor([-3.0996535,
                       -2.5120323,
                       -2.1263952,
@@ -86,9 +86,9 @@ def round_to_nearest_centroid(data: torch.Tensor, bitwidth: int) -> torch.Tensor
                       1.829787,
                       2.1263952,
                       2.5120323,
-                      3.0996535], device='cuda')
+                      3.0996535])
     ]
-    selected_centroids = centroids[bitwidth - 1] / math.sqrt(128)
+    selected_centroids = centroids[bitwidth - 1].to(device=data.device, dtype=data.dtype) / math.sqrt(128)
     distances = torch.abs(data.unsqueeze(-1) - selected_centroids)
     closest_indices = torch.argmin(distances, dim=-1)
 
@@ -101,11 +101,9 @@ class TurboSketch(torch.nn.Module):
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.bit_width = bit_width
         self.dimension = dimension
-        self.random_gaussian = torch.randn((bit_width, dimension, dimension), device=self.device)
+        self.random_gaussian = torch.randn((bit_width, dimension, dimension),
+                                           device=self.device, generator=rng)
         self.proj_dir = self.init_rot_dir().to(dtype).contiguous()
-
-    def _init_proj_dir(self, rng):
-        return torch.randn(self.dim, generator=rng, dtype=torch.float32, device=self.device)
 
     def init_rot_dir(self):
         rot_dir = []
@@ -134,7 +132,7 @@ class TurboSketch(torch.nn.Module):
 
 class TurboKeyQuantizer:
     def __init__(self, qjl_residual: TurboSketch, qjl_outlier: TurboSketch, buffer_size: int, group_size: int,
-                 bit_width: int) -> None:
+                 bit_width: int, top_channels: int = 32) -> None:
         self.qjl_residual = qjl_residual
         self.qjl_outlier = qjl_outlier
 
@@ -150,9 +148,10 @@ class TurboKeyQuantizer:
         self.outliers_norm = None
 
         self.key_buffered = None
+        self.quantized_len = 0
 
         self.bit_pack_len = 8
-        self.top_channels = 32
+        self.top_channels = top_channels
         self.outliers_indices = None
 
     def build_sketch(self, key_states: torch.Tensor) -> None:
@@ -163,7 +162,10 @@ class TurboKeyQuantizer:
         if residual_size > 0:
             self.key_buffered = key_states[:, :, self.seq_len - residual_size:, :]
         if residual_size == self.seq_len:
+            self.quantized_len = 0
             return None
+
+        self.quantized_len = self.seq_len - residual_size
 
         norms_channel = torch.norm(key_states, dim=-2)
         self.outliers_indices = torch.topk(norms_channel, k=self.top_channels, dim=-1, largest=True).indices
@@ -172,46 +174,51 @@ class TurboKeyQuantizer:
 
         outliers, residual = split_outliers_and_residual(key_states, self.outliers_indices)
 
-        self.residual_norm = torch.norm(residual, dim=-1)
-        self.outliers_norm = torch.norm(outliers, dim=-1)
+        self.residual_norm = torch.norm(residual, dim=-1).clamp_min(1e-8)
+        self.outliers_norm = torch.norm(outliers, dim=-1).clamp_min(1e-8)
 
         self.residual_quant_binary = self.qjl_residual.quantize(residual / self.residual_norm.unsqueeze(-1))
         self.outliers_quant_binary = self.qjl_outlier.quantize(outliers / self.outliers_norm.unsqueeze(-1))
 
-    def _update_norms(self) -> None:
-        residual_norm = torch.norm(self.key_buffered, dim=-1)
-        if self.key_states_norm is None:
-            self.key_states_norm = residual_norm
-        else:
-            self.key_states_norm = torch.cat([self.key_states_norm, residual_norm], dim=2)
+    def _flush_buffer(self) -> None:
+        b, h, n, dim = self.key_buffered.shape
 
-    def _update_qjl(self, outlier, residual) -> None:
-        key_states_quant = self.qjl_residual.quantize(res)
+        if self.outliers_indices is None:
+            norms_channel = torch.norm(self.key_buffered, dim=-2)
+            self.outliers_indices = torch.topk(norms_channel, k=self.top_channels, dim=-1, largest=True).indices
 
-        if self.key_states_quant_binary is None:
-            self.key_states_quant_binary = key_states_quant
+        outliers, residual = split_outliers_and_residual(self.key_buffered, self.outliers_indices)
+
+        res_norm = torch.norm(residual, dim=-1).clamp_min(1e-8)
+        out_norm = torch.norm(outliers, dim=-1).clamp_min(1e-8)
+        res_quant = self.qjl_residual.quantize(residual / res_norm.unsqueeze(-1))
+        out_quant = self.qjl_outlier.quantize(outliers / out_norm.unsqueeze(-1))
+
+        if self.residual_quant_binary is not None:
+            self.residual_quant_binary = torch.cat([self.residual_quant_binary, res_quant], dim=2)
+            self.outliers_quant_binary = torch.cat([self.outliers_quant_binary, out_quant], dim=2)
+            self.residual_norm = torch.cat([self.residual_norm, res_norm], dim=2)
+            self.outliers_norm = torch.cat([self.outliers_norm, out_norm], dim=2)
         else:
-            self.key_states_quant_binary = torch.cat([self.key_states_quant_binary, key_states_quant], dim=2)
+            self.residual_quant_binary = res_quant
+            self.outliers_quant_binary = out_quant
+            self.residual_norm = res_norm
+            self.outliers_norm = out_norm
+
+        self.quantized_len += n
+        self.key_buffered = None
 
     def update_sketch(self, key_states: torch.Tensor) -> None:
         assert key_states.shape[-2] == 1, 'appending more than one embedding in the stream!'
         self.seq_len += 1
 
-        if self.key_buffered != None:
+        if self.key_buffered is not None:
             self.key_buffered = torch.cat([self.key_buffered, key_states], dim=-2)
         else:
             self.key_buffered = key_states
 
-        # if self.seq_len % self.buffer_size != 0:
-        return None
-
-        b, h, _, dim = self.key_buffered.shape
-        self.key_buffered = self.key_buffered.reshape((b, h, -1, dim))
-        outlier, residual = self.qjl_residual.quantize(self.key_buffered)
-        self._update_qjl(outlier, residual)
-        self._update_norms(outlier, residual)
-
-        self.key_buffered = None
+        if self.key_buffered.shape[-2] >= self.buffer_size:
+            self._flush_buffer()
 
     def attention_score(self, query_states: torch.Tensor) -> torch.Tensor:
         b, h, _, dim = query_states.shape
@@ -222,7 +229,7 @@ class TurboKeyQuantizer:
             residual = repeat_kv_quant(self.key_buffered, n_rep=h // h_k)
             residual = torch.matmul(query_states, residual.transpose(-1, -2))
 
-        if self.outliers_quant_binary is None:
+        if self.quantized_len == 0 or self.outliers_quant_binary is None:
             return residual
 
         h_k = self.outliers_indices.shape[1]
@@ -251,6 +258,7 @@ class TurboValueQuantizer:
         self.quant_norm = None
 
         self.value_buffered = None
+        self.quantized_len = 0
 
     def build_sketch(self, value_states: torch.Tensor) -> None:
         b, h, _, dim = value_states.shape
@@ -260,48 +268,59 @@ class TurboValueQuantizer:
         if residual_size > 0:
             self.value_buffered = value_states[:, :, self.seq_len - residual_size:, :]
         if residual_size == self.seq_len:
+            self.quantized_len = 0
             return None
-        
-        value_states = value_states[:, :, :self.seq_len - residual_size, :]
-        self.value_states_norm = torch.norm(value_states, dim=-1)
+
+        self.quantized_len = self.seq_len - residual_size
+        value_states = value_states[:, :, :self.quantized_len, :]
+        self.value_states_norm = torch.norm(value_states, dim=-1).clamp_min(1e-8)
 
         self.value_states_quant = self.quantizer_value.quantize(value_states / self.value_states_norm.unsqueeze(-1))
 
+    def _flush_buffer(self) -> None:
+        b, h, n, dim = self.value_buffered.shape
 
-    def _update_norms(self) -> None:
-        residual_norm = torch.norm(self.value_residual, dim=-1)
-        self.value_states_norm = torch.cat([self.value_states_norm, residual_norm], dim=2).contiguous()
+        val_norm = torch.norm(self.value_buffered, dim=-1).clamp_min(1e-8)
+        val_quant = self.quantizer_value.quantize(self.value_buffered / val_norm.unsqueeze(-1))
 
-    def _update_qjl(self) -> None:
-        value_states_quant = self.qjl_sketch.quantize(self.value_residual)
-        self.value_states_quant = torch.cat([self.value_states_quant, value_states_quant], dim=2).contiguous()
+        if hasattr(self, 'value_states_quant') and self.value_states_quant is not None:
+            self.value_states_quant = torch.cat([self.value_states_quant, val_quant], dim=2)
+            self.value_states_norm = torch.cat([self.value_states_norm, val_norm], dim=2)
+        else:
+            self.value_states_quant = val_quant
+            self.value_states_norm = val_norm
+
+        self.quantized_len += n
+        self.value_buffered = None
 
     def update_sketch(self, value_states: torch.Tensor) -> None:
         assert value_states.shape[-2] == 1, 'appending more than one embedding in the stream!'
         self.seq_len += 1
 
-        if self.value_residual != None:
-            self.value_residual = torch.cat([self.value_residual, value_states], dim=-2)
+        if self.value_buffered is not None:
+            self.value_buffered = torch.cat([self.value_buffered, value_states], dim=-2)
         else:
-            self.value_residual = value_states
+            self.value_buffered = value_states
 
-        # if self.seq_len % self.buffer_size != 0:
-        return None
-
-        self._update_qjl()
-        self._update_norms()
-
-        self.value_residual = None
+        if self.value_buffered.shape[-2] >= self.buffer_size:
+            self._flush_buffer()
 
     def attention_score(self, att: torch.Tensor) -> torch.Tensor:
         b, h, _, dim = att.shape
         residual = None
-        res_len = self.seq_len
-        if self.value_residual != None:
-            res_len = self.seq_len - self.seq_len % self.buffer_size
-            residual = torch.matmul(att[:, :, :, res_len:], self.value_residual)
+        res_len = self.quantized_len
+        if self.value_buffered != None:
+            h_k = self.value_buffered.shape[1]
+            value_buffered_repeat = repeat_kv_quant(self.value_buffered, n_rep=h // h_k)
+            residual = torch.matmul(att[:, :, :, res_len:], value_buffered_repeat)
 
-        scores = self.quantizer_value.calc_score(att[:, :, :, :res_len], self.value_states_quant, self.value_states_norm)
+        if res_len == 0:
+            return residual
+
+        h_k = self.value_states_quant.shape[1]
+        values_repeat = repeat_kv_quant(self.value_states_quant, n_rep=h // h_k)
+        norms_repeat = repeat_kv_quant(self.value_states_norm.unsqueeze(-1), n_rep=h // h_k)
+        scores = torch.matmul(att[:, :, :, :res_len], values_repeat * norms_repeat)
 
         if residual != None:
             return scores + residual

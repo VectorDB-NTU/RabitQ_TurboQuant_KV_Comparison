@@ -17,9 +17,6 @@ from transformers.models.llama.configuration_llama import *
 from transformers.models.llama.modeling_llama import *
 from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 
-from qjl_kernel.new_pack import triton_quantize_and_pack_along_last_dim
-from qjl_kernel.matmul import cuda_quantized_bmm_dynamic
-
 from utils_turbo_outlier import TurboSketch, TurboKeyQuantizer, TurboValueQuantizer, repeat_kv_quant
 
 from transformers.modeling_outputs import (
@@ -184,7 +181,9 @@ class LlamaAttention_QJL(nn.Module):
         self.key_quantization_bits = config.key_quantization_bits
 
         self.qjl_residual = config.qjl_residual
+        self.quantizer_value = config.qjl_value
 
+        self.outlier_count = config.outlier_count_general
         self.value_quantization_bits = config.value_quantization_bits
         self.group_size = config.group_size
         self.buffer_size = config.buffer_size
@@ -243,7 +242,8 @@ class LlamaAttention_QJL(nn.Module):
                     )
                 attn_weights = attn_weights + attention_mask
                 attn_weights = torch.max(
-                    attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min)
+                    attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min,
+                                               device=attn_weights.device)
                 )
 
             attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
@@ -281,7 +281,7 @@ class LlamaAttention_QJL(nn.Module):
                 value_states_repeat.transpose(1, 2), None, q_len, dropout=0.0, is_causal=self.is_causal,
             )
             kv_quant = TurboKeyQuantizer(self.qjl_residual, self.qjl_outlier, self.buffer_size, self.group_size,
-                                        self.key_quantization_bits)
+                                        self.key_quantization_bits, top_channels=self.outlier_count)
             val_quant = TurboValueQuantizer(self.quantizer_value, self.buffer_size, self.group_size, self.value_quantization_bits)
 
             kv_quant.build_sketch(key_states)
