@@ -1,31 +1,28 @@
 /*
  * Python binding for RaBitQ GPU quantization.
  *
- * Only exposes quantization on pre-rotated residuals (no rotation inside).
- * Rotation is handled in Python via torch.matmul, same as TurboSketch.
- *
  * API:
- *   rabitq.quantize(residuals, total_bits, fast=True)
+ *   rabitq.quantize(residuals, total_bits, fast=True, seed=42)
  *     -> (codes, delta, vl)
  *
  *   Reconstruction: recon[i,j] = float(codes[i,j]) * delta[i] + vl[i]
  */
 
 #include <torch/extension.h>
-#include "quantizer_standalone.cuh"
+#include <c10/cuda/CUDAGuard.h>
+#include "quantizer/quantizer_standalone.cuh"
+#include "quantizer/rescale_search_gpu.cuh"
 
-/// Quantize pre-rotated residuals. No rotation applied.
-/// residuals: (N, D) float32 CUDA tensor (D must be multiple of 64, or will be padded)
-/// total_bits: 1-8
-/// Returns: (codes, delta, vl)
 static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
-quantize(torch::Tensor residuals, int64_t total_bits, bool fast) {
+quantize(torch::Tensor residuals, int64_t total_bits, bool fast, uint64_t seed) {
     TORCH_CHECK(residuals.is_cuda(), "residuals must be a CUDA tensor");
     TORCH_CHECK(residuals.dtype() == torch::kFloat32, "residuals must be float32");
     TORCH_CHECK(residuals.dim() == 2, "residuals must be 2D (N, D)");
     TORCH_CHECK(total_bits >= 1 && total_bits <= 8, "total_bits must be 1-8");
 
     auto data = residuals.contiguous();
+    at::cuda::CUDAGuard device_guard(data.device());
+
     int64_t N = data.size(0);
     int64_t D = data.size(1);
     uint32_t padded_D = ((static_cast<uint32_t>(D) + 63u) / 64u) * 64u;
@@ -44,7 +41,7 @@ quantize(torch::Tensor residuals, int64_t total_bits, bool fast) {
     // Compute const_scaling_factor if fast mode
     float const_sf = 0.0f;
     if (fast && ex_bits > 0) {
-        const_sf = DataQuantizerGPU::get_const_scaling_factors_fully_gpu(padded_D, ex_bits);
+        const_sf = rabitq_get_const_scaling_factor_gpu(padded_D, ex_bits, seed);
     }
 
     // Allocate outputs
@@ -53,7 +50,7 @@ quantize(torch::Tensor residuals, int64_t total_bits, bool fast) {
     auto delta = torch::empty({N}, torch::dtype(torch::kFloat32).device(data.device()));
     auto vl = torch::empty({N}, torch::dtype(torch::kFloat32).device(data.device()));
 
-    // Quantize (no rotation — input is already rotated)
+    // Quantize
     standalone_quantize_fused_on_residuals(
         padded.data_ptr<float>(),
         static_cast<size_t>(N),
@@ -80,6 +77,7 @@ PYBIND11_MODULE(rabitq, m) {
           py::arg("residuals"),
           py::arg("total_bits"),
           py::arg("fast") = true,
+          py::arg("seed") = 42,
           "Quantize pre-rotated residuals (N, D) float32 CUDA.\n"
           "Returns (codes, delta, vl). Recon: codes * delta[:, None] + vl[:, None]");
 }

@@ -1,0 +1,43 @@
+# Core
+torch==2.4.1
+transformers==4.48.2
+# flash_attn installed separately with --no-build-isolation in setup script
+accelerate==1.3.0
+datasets==2.21.0
+numpy==1.26.4
+tokenizers==0.21.4
+safetensors==0.7.0
+huggingface_hub==0.36.2
+sentencepiece==0.2.1
+hf-xet==1.4.3
+
+# Evaluation
+tqdm==4.67.3
+rouge==1.0.1
+fuzzywuzzy==0.18.0
+python-Levenshtein==0.27.3
+jieba==0.42.1
+pytest==9.0.3
+
+# Needle-in-a-Haystack
+openai==1.109.1
+tiktoken==0.12.0
+anthropic==0.96.0
+langchain==0.2.17
+langchain-core==0.2.43
+langchain-openai==0.1.25
+langchain-community==0.2.19
+langchain-anthropic==0.1.23
+langchain-cohere==0.2.4
+langchain-text-splitters==0.2.4
+langsmith==0.1.147
+
+# Common dependencies
+pydantic==2.13.2
+pydantic_core==2.46.2
+Jinja2==3.1.6
+PyYAML==6.0.3
+requests==2.33.1
+filelock==3.29.0
+packaging==24.2
+typing_extensions==4.15.0

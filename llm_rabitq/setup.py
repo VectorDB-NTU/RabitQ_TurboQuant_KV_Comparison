@@ -3,7 +3,7 @@ Build rabitq Python extension.
 
 Usage:
     cd llm_rabitq
-    pip install -e .
+    pip install -e . --no-build-isolation
 """
 
 import os
@@ -12,20 +12,13 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 cuda_sources = [
     "binding.cpp",
-    "inc/quantizer_standalone.cu",
-    "inc/rotator_gpu.cu",
-    "inc/fht_kac_rotator_gpu.cu",
-    "inc/quantizer_gpu_fast.cu",
+    "src/quantizer/quantizer_standalone.cu",
+    "src/quantizer/rescale_search_gpu.cu",
 ]
 
 include_dirs = [
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "inc"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "include"),
 ]
-
-for d in ["/usr/include/eigen3", "/usr/local/include/eigen3"]:
-    if os.path.isdir(d):
-        include_dirs.append(d)
-        break
 
 setup(
     name="rabitq",
@@ -38,7 +31,6 @@ setup(
                 "cxx": ["-O3", "-std=c++17"],
                 "nvcc": ["-O3", "--std=c++17", "--expt-relaxed-constexpr", "-lineinfo"],
             },
-            libraries=["cublas"],
         ),
     ],
     cmdclass={"build_ext": BuildExtension},

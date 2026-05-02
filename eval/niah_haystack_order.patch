@@ -1,0 +1,73 @@
+diff --git a/needlehaystack/llm_needle_haystack_tester.py b/needlehaystack/llm_needle_haystack_tester.py
+--- a/needlehaystack/llm_needle_haystack_tester.py
++++ b/needlehaystack/llm_needle_haystack_tester.py
+@@ -284,8 +284,66 @@ class LLMNeedleHaystackTester:
+     def read_context_files(self):
+         context = ""
+         max_context_length = max(self.context_lengths)
+         base_dir = os.path.abspath(os.path.dirname(__file__))  # Package directory
+
++        # Fixed glob order from the machine used to produce the paper results.
++        # glob.glob() returns different orders on different filesystems,
++        # so we hardcode it here for reproducibility.
++        haystack_file_order = [
++            "nft.txt",
++            "vcsqueeze.txt",
++            "corpdev.txt",
++            "hubs.txt",
++            "mod.txt",
++            "before.txt",
++            "ecw.txt",
++            "weird.txt",
++            "pow.txt",
++            "goodtaste.txt",
++            "copy.txt",
++            "gh.txt",
++            "todo.txt",
++            "aord.txt",
++            "gba.txt",
++            "desres.txt",
++            "laundry.txt",
++            "addiction.txt",
++            "popular.txt",
++            "philosophy.txt",
++            "siliconvalley.txt",
++            "rss.txt",
++            "gap.txt",
++            "avg.txt",
++            "bias.txt",
++            "unions.txt",
++            "superangels.txt",
++            "want.txt",
++            "web20.txt",
++            "rootsoflisp.txt",
++            "foundervisa.txt",
++            "sun.txt",
++            "diff.txt",
++            "langdes.txt",
++            "love.txt",
++            "boss.txt",
++            "iflisp.txt",
++            "vb.txt",
++            "apple.txt",
++            "wisdom.txt",
++            "island.txt",
++            "vw.txt",
++            "useful.txt",
++            "newideas.txt",
++            "worked.txt",
++            "submarine.txt",
++            "startuplessons.txt",
++            "founders.txt",
++            "know.txt",
++        ]
++        ordered_files = [
++            os.path.join(base_dir, self.haystack_dir, f) for f in haystack_file_order
++        ]
++
+         while self.get_context_length_in_tokens(context) < max_context_length:
+-            for file in glob.glob(os.path.join(base_dir, self.haystack_dir, "*.txt")):
++            for file in ordered_files:
+                 with open(file, 'r') as f:
+                     context += f.read()
+         return context

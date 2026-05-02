@@ -9,6 +9,13 @@ Usage:
 
 import pytest
 import torch
+import time
+from pathlib import Path
+import sys
+
+REPO_DIR = Path(__file__).resolve().parents[2]
+if str(REPO_DIR) not in sys.path:
+    sys.path.insert(0, str(REPO_DIR))
 
 
 def _require_cuda():
@@ -187,12 +194,63 @@ class TestDeterminism:
     def test_same_input_same_output(self):
         _require_cuda()
         import rabitq
+        torch.manual_seed(42)
         x = torch.randn(64, 128, device='cuda', dtype=torch.float32)
-        c1, d1, v1 = rabitq.quantize(x, total_bits=2)
-        c2, d2, v2 = rabitq.quantize(x, total_bits=2)
+        c1, d1, v1 = rabitq.quantize(x, total_bits=2, seed=42)
+        c2, d2, v2 = rabitq.quantize(x, total_bits=2, seed=42)
         assert torch.equal(c1, c2)
         assert torch.equal(d1, d2)
         assert torch.equal(v1, v2)
+
+    def test_same_seed_reproducible_across_seconds(self):
+        """Guard against time-based seeding inside the CUDA extension."""
+        _require_cuda()
+        import rabitq
+        torch.manual_seed(42)
+        x = torch.randn(64, 128, device='cuda', dtype=torch.float32)
+
+        c1, d1, v1 = rabitq.quantize(x, total_bits=2, seed=42)
+        time.sleep(1.1)
+        c2, d2, v2 = rabitq.quantize(x, total_bits=2, seed=42)
+
+        assert torch.equal(c1, c2)
+        assert torch.equal(d1, d2)
+        assert torch.equal(v1, v2)
+
+    def test_different_seed_changes_fast_scaling_factor(self):
+        _require_cuda()
+        import rabitq
+        torch.manual_seed(42)
+        x = torch.randn(64, 128, device='cuda', dtype=torch.float32)
+
+        _, d1, v1 = rabitq.quantize(x, total_bits=2, seed=42)
+        _, d2, v2 = rabitq.quantize(x, total_bits=2, seed=43)
+
+        assert not (torch.equal(d1, d2) and torch.equal(v1, v2))
+
+    def test_sketch_rng_reproducible_across_seconds(self):
+        """Match the LLM path: RaBitQSketch gets seeds from a fixed torch.Generator."""
+        _require_cuda()
+        from kvcache_quant.rabitq_sketch import RaBitQSketch
+
+        torch.manual_seed(42)
+        x = torch.randn(64, 128, device='cuda', dtype=torch.float32)
+
+        gen1 = torch.Generator(device='cuda')
+        gen1.manual_seed(42)
+        sketch1 = RaBitQSketch(dimension=128, bit_width=2, rng=gen1)
+        q1 = sketch1.quantize(x)
+
+        time.sleep(1.1)
+
+        gen2 = torch.Generator(device='cuda')
+        gen2.manual_seed(42)
+        sketch2 = RaBitQSketch(dimension=128, bit_width=2, rng=gen2)
+        q2 = sketch2.quantize(x)
+
+        assert sketch1.seed == sketch2.seed
+        assert torch.equal(sketch1.rotation, sketch2.rotation)
+        assert torch.equal(q1, q2)
 
 
 if __name__ == "__main__":

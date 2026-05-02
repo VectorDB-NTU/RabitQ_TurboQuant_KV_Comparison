@@ -237,10 +237,13 @@ __device__ __forceinline__ void fht_body(float x[kNChunks][kNElts], float* smem_
 // Fused 4-round rotation kernel (power-of-2 path)
 // ============================================================================
 
+// NOTE: `input` and `output` are intentionally NOT marked __restrict__ — this
+// kernel supports in-place rotation (output may alias input). Each block reads
+// its row fully into registers before any writeback, so aliasing is safe.
 template<int kLogN>
 __global__ void fht_kac_rotate_fused_kernel(
-    const float* __restrict__ input,
-    float* __restrict__ output,
+    const float* input,
+    float* output,
     const uint8_t* __restrict__ flip,
     int N, float total_scale)
 {
@@ -278,10 +281,12 @@ __global__ void fht_kac_rotate_fused_kernel(
 // Fused 4-round rotation kernel (non-power-of-2 path)
 // ============================================================================
 
+// NOTE: `input`/`output` intentionally not __restrict__ — supports in-place
+// rotation. Each block stages its row into shared memory before any writeback.
 template<int kLogTrunc>
 __global__ void fht_kac_rotate_fused_nonpow2_kernel(
-    const float* __restrict__ input,
-    float* __restrict__ output,
+    const float* input,
+    float* output,
     const uint8_t* __restrict__ flip,
     int N, int padded_dim, float fac, float final_scale)
 {

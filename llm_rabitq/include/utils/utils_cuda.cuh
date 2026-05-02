@@ -1,6 +1,5 @@
-//
-// Created by Stardust on 3/4/25.
-//
+#ifndef RABITQ_GPU_UTILS_CUDA_CUH
+#define RABITQ_GPU_UTILS_CUDA_CUH
 
 #include <iostream>
 
@@ -24,3 +23,5 @@
             std::exit(EXIT_FAILURE);                                         \
         }                                                                    \
     } while (0)
+
+#endif // RABITQ_GPU_UTILS_CUDA_CUH

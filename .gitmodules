@@ -1,0 +1,6 @@
+[submodule "LongBench"]
+	path = LongBench
+	url = git@github.com:THUDM/LongBench.git
+[submodule "LLMTest_NeedleInAHaystack"]
+	path = LLMTest_NeedleInAHaystack
+	url = https://github.com/gkamradt/LLMTest_NeedleInAHaystack.git

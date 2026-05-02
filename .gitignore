@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+*.so
+
+# CUDA extension build artifacts
+llm_rabitq/build/
+llm_rabitq/*.egg-info/
+llm_rabitq/*.so
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Results
+result/
+
+# Needle-in-a-Haystack framework (cloned externally)
+LLMTest_NeedleInAHaystack/
+
+# HuggingFace cache
+.cache/
+
+# numpy data files
+*.npy
