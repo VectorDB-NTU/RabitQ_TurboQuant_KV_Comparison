@@ -41,6 +41,10 @@ class TurboSketch(torch.nn.Module):
         return torch.stack(rot_dir)
 
     def quantize(self, keys):
+        # Simple test implementation: quantize then immediately dequantize to observe
+        # the error introduced by quantization. This does not save memory or compute.
+        # In practice, one can compute inner products directly in the rotated space
+        # using the codebook, without rotating back to the original space.
         assert keys.shape[-1] == self.dimension
         rotated_vectors = keys @ self.proj_dir[0, :, :].T
         quantized_vectors = round_to_nearest_centroid(rotated_vectors, self.bit_width).to(self.proj_dir.dtype)
